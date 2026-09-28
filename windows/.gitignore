@@ -1,0 +1,5 @@
+bin/
+obj/
+WebView2/
+snapshot.json
+*.user
