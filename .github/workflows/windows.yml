@@ -1,0 +1,85 @@
+name: Build and release Windows
+on:
+  push:
+    branches: [main]
+    paths: ['windows/**', '.github/workflows/windows.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: '10.0.x'
+      - name: Build Windows application
+        shell: pwsh
+        run: |
+          dotnet publish windows/BlackboardDesktop.csproj -c Release -r win-x64 --self-contained true -o dist/app
+          if ($LASTEXITCODE -ne 0) { throw 'Build failed' }
+      - name: Test native app and WebView2
+        shell: pwsh
+        run: |
+          $report = Join-Path $PWD 'test-results'
+          $process = Start-Process -FilePath 'dist/app/BlackboardDesktop.exe' -ArgumentList @('--self-test', $report) -PassThru
+          if (-not $process.WaitForExit(180000)) { $process.Kill(); throw 'Windows app tests timed out' }
+          if (Test-Path "$report/checks.txt") { Get-Content "$report/checks.txt" }
+          if ($process.ExitCode -ne 0 -or -not (Test-Path "$report/result.json")) { throw 'Windows app tests failed' }
+          if (-not (Get-Content "$report/result.json" | ConvertFrom-Json).passed) { throw 'Windows checks failed' }
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: windows-test-results
+          path: test-results/
+          if-no-files-found: warn
+      - name: Package ZIP and installer
+        shell: pwsh
+        run: |
+          Copy-Item windows/README.md dist/app/README.md
+          Compress-Archive -Path dist/app/* -DestinationPath dist/BlackboardDesktop-Windows-x64-v1.0.0.zip
+          $compiler = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $compiler)) { throw 'Inno Setup compiler unavailable on this runner' }
+          & $compiler windows/installer.iss
+          if ($LASTEXITCODE -ne 0) { throw 'Installer build failed' }
+          Get-ChildItem dist -File | ForEach-Object { $hash = Get-FileHash $_.FullName -Algorithm SHA256; "$($hash.Hash.ToLower())  $($_.Name)" } | Set-Content dist/SHA256SUMS.txt
+      - name: Test installed application
+        shell: pwsh
+        run: |
+          $target = Join-Path $env:RUNNER_TEMP 'BlackboardInstalled'
+          $setup = Start-Process 'dist/BlackboardDesktop-Windows-x64-Setup-v1.0.0.exe' -ArgumentList @('/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', "/DIR=$target") -Wait -PassThru
+          if ($setup.ExitCode -ne 0) { throw 'Installer failed' }
+          $report = Join-Path $PWD 'installed-test-results'
+          $process = Start-Process "$target/BlackboardDesktop.exe" -ArgumentList @('--self-test', $report) -PassThru
+          if (-not $process.WaitForExit(180000)) { $process.Kill(); throw 'Installed app test timed out' }
+          if (Test-Path "$report/checks.txt") { Get-Content "$report/checks.txt" }
+          if ($process.ExitCode -ne 0 -or -not (Test-Path "$report/result.json")) { throw 'Installed app failed' }
+          if (-not (Get-Content "$report/result.json" | ConvertFrom-Json).passed) { throw 'Installed checks failed' }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-release
+          path: |
+            dist/*.exe
+            dist/*.zip
+            dist/SHA256SUMS.txt
+            windows/RELEASE-NOTES.md
+          if-no-files-found: error
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: windows-release
+          path: release-files
+      - name: Publish Windows release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          BUILD_SHA: ${{ github.sha }}
+        run: |
+          gh release create windows-v1.0.0 release-files/dist/*.exe release-files/dist/*.zip release-files/dist/SHA256SUMS.txt --target "$BUILD_SHA" --title "Windows v1.0.0 · Blackboard 作业提醒" --notes-file release-files/windows/RELEASE-NOTES.md --latest=false
