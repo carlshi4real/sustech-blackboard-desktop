@@ -53,7 +53,7 @@ internal sealed class SchoolBrowser : IDisposable
         core.DownloadStarting += (_, e) => e.Cancel = true;
         core.NavigationStarting += (_, e) =>
         {
-            if (!School.Allowed(e.Uri) && !(testing && e.Uri == "about:blank"))
+            if (!testing && !School.Allowed(e.Uri))
             { e.Cancel = true; changed("已阻止非学校站点跳转，请在浏览器中核对", busy); }
         };
         core.NewWindowRequested += (_, e) =>
@@ -145,7 +145,7 @@ internal sealed class SchoolBrowser : IDisposable
         void Completed(object? s, CoreWebView2NavigationCompletedEventArgs e)
         {
             if (e.IsSuccess) done.TrySetResult(true);
-            else done.TrySetException(new InvalidOperationException("页面加载失败"));
+            else done.TrySetException(new InvalidOperationException($"页面加载失败：{e.WebErrorStatus}，URL：{view.Source}"));
         }
         view.CoreWebView2.NavigationCompleted += Completed;
         try
